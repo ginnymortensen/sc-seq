@@ -1,0 +1,154 @@
+---
+title: "HW 2 - PROGRAMMING PORTION"
+output: html_document
+date: "2023-03-19"
+---
+
+# HW2 Q1.3
+
+ In this program we will use the same data obtained in Q1.1 and perform dimension reduction
+ following the cisTopic tutorial:
+ 
+http://htmlpreview.github.io/?https://github.com/aertslab/cisTopic/blob/master/vignettes/WarpLDA_CompleteAnalysis.html
+
+
+Our purpose is to compare results obtained from EpiScanpy.
+
+
+## Prepare data
+
+### Load libraries
+```{r}
+library(cisTopic)
+library(tidyverse)
+library(Matrix)
+```
+### Read in files
+
+We are using the Matrix package to read in our .mtx file
+
+``` {r}
+setwd("C:/Users/genev/OneDrive - Indiana University/Classes/I529/HW2")
+
+counts <- readMM("GSE126074_AdBrainCortex_SNAREseq_chromatin.counts.mtx")
+barcodes <- read_lines("GSE126074_AdBrainCortex_SNAREseq_chromatin.barcodes.tsv")
+peaks <- read_lines("GSE126074_AdBrainCortex_SNAREseq_chromatin.peaks.tsv")
+```
+
+### Format data
+
+We can used Matrix package functions to format our data as a sparse matrix, then assign peaks and barcodes according to cisTopic's API.
+
+```{r}
+counts <- as(counts, "dgCMatrix")
+dimnames(counts)=list(peaks, barcodes)
+```
+### Create cisTopic object
+```{r}
+cisTopicObject <- createcisTopicObject(counts, project.name='HW2-Q1-3')
+```
+## Build models
+
+Here we build the models used to perform dimension reduction using LDA because that is what is required by cisTopic for us to find the appropriate number of topics used to model the data. This is equivalent to the 'epi.pp.lazy()' function used by EpiScanpy. This operation takes quite a long time to run, so we are only using a maximum of 30 topics, since that is around where the log-likelihood begins to stabilize, and we are only performing 200 iterations per model as opposed to the default of 500. Our results won't be as optimal, but we only have limited computational resources on the average PC.
+
+```{r}
+cisTopicObject <- runWarpLDAModels(cisTopicObject, topic=c(2:15, 20, 25, 30), seed=123, nCores=4, iterations = 200, addModels=FALSE)
+```
+### Plot the models
+
+ Now we must plot the models which have been created. The log likelihood graph shows us the plausibility of a model's parameter values given the data used to build the model. The best number of topics used to create a model will be evident in the knee of the log-likelihood curve.
+ 
+ The second derivative function is directly computed from the log-likelihood curve. It calculates the change in curvature of the log-likelihood from each point, or each number of topics used to build the model. A maximum in this curve shows that the likelihood that the constructed model using that number of topics contains the most plausible parameters for the given data doesn't improve when more topics are added. 
+ The perplexity curve shows us how well the model predicts a sample, and the minimum represents the best model achieved by the corresponding number of topics.
+ 
+ We see that 11 topics is the best number of topics to use to build our model.
+
+```{r}
+par(mfrow=c(3,3))
+cisTopicObject <- selectModel(cisTopicObject, type='maximum')
+cisTopicObject <- selectModel(cisTopicObject, type='perplexity')
+cisTopicObject <- selectModel(cisTopicObject, type='derivative')
+```
+## Identify topics
+
+### Identify cell states
+
+Here we will use Umap to begin our dimension reduction and clustering. When plotting Umap clusters, we will see each topic plotted on two Umap axes with data points plotted accordingly, with colors corresponding to the probability contribution of that data to that topic.
+
+To identify cell states, we perform dimension reduction on the cells of the data, hopefully clustering them together.
+
+```{r}
+cisTopicObject <- runUmap(cisTopicObject, target='cell')
+par(mfrow=c(3,4))
+plotFeatures(cisTopicObject, method='Umap', target='cell', 
+             topic_contr='Probability', colorBy=NULL, 
+             cex.legend = 0.8, factor.max=.75, 
+             dim=2, legend=TRUE)
+```
+The interpretation of the model built using 11 topics is that there are different cell states which are characterized by the 11 different clusters, or categories. Here we have no metadata to integrate, so there isn't a biological connection we can make, but qualitatively we can see that there are some regions which contribute more to a topic than others and which characterize a cell moreso.
+
+Since we performed dimension reduction using PCA in the EpiScanpy package, we should also visualize PCA using cisTopic.
+
+```{r}
+cisTopicObject <- runPCA(cisTopicObject, target='cell')
+
+par(mfrow=c(3,4))
+plotFeatures(cisTopicObject, method='PCA', target='cell', 
+             topic_contr='Probability', colorBy=NULL, 
+             cex.legend = 0.8, factor.max=.75, 
+             dim=2, legend=TRUE)
+```
+
+Great, so we see some distinction between cells for each cluster.
+
+When plotting PCA, we see very similar reduction as to what we saw with EpiScanpy, where there was poor clustering and an almost "sideways-volcano" looking distribution indicating that the data was not very well explained by just the first two principal components. However, because this is consistent when using both cisTopic and EpiScanpy methods, we can rest assured that our results are valid and that PCA is probably not the best way to perform dimension reduction on this data.
+
+## Analyze topics
+
+### Score each region per topic
+
+We can score each region's contribution to a topic which tells us how likely it is that the region belongs to that topic. This step is similar to the epi.pp.cal_var() function in EpiScanpy where we select the most variable features and score the cells sharing a feature, except here we are scoring the regions sharing a topic.
+
+```{r}
+cisTopicObject <- getRegionsScores(cisTopicObject, method='NormTop', scale=TRUE)
+par(mfrow=c(3,4))
+cisTopicObject <- binarizecisTopics(cisTopicObject, thrP=0.975, plot=TRUE)
+```
+
+When we compare the second plot to our EpiScanpy plots of variability score by the number of ranked features (this was created by using epi.pl.variability_feature()), we see that the maximum number of regions selected per topic corresponds to our chosen feature value threshold. This value is observed to be 60000. This makes sense because that value was located directly after the elbow of our variability score function in our EpiScanpy plot. 
+
+This gives credibility to the maxima of our allocated regions per topic in our cisTopic implementation, and actually seems more robust than EpiScanpy.
+
+A disparity between our results with cisTopic versus EpiScanpy is that the number of topics, or clusters, differs between the two methods. cisTopic gives us better control over how models are built and leads to more informative conclusions, although the quality of the clustering does not differ between EpiScanpy or cisTopic. Cluster morphologies are the same.
+
+### Perform dimension reduction on the chromosomal regions
+
+Let's see how everything looks when we try to identify chromosomal regions as we attempted to do so with EpiScanpy.
+
+```{r}
+cisTopicObject <- runUmap(cisTopicObject, target='region')
+
+par(mfrow=c(3,4))
+plotFeatures(cisTopicObject, method='Umap', target='region', 
+             topic_contr='Probability', colorBy=NULL, 
+             cex.legend = 0.8, factor.max=.75, 
+             dim=2, legend=TRUE)
+```
+
+Now, let's do some PCA on the regions
+
+```{r}
+cisTopicObject <- runPCA(cisTopicObject, target='region')
+
+par(mfrow=c(3,4))
+plotFeatures(cisTopicObject, method='PCA', target='region', 
+             topic_contr='Probability', colorBy=NULL, 
+             cex.legend = 0.8, factor.max=.75, 
+             dim=2, legend=TRUE)
+```
+
+You'll notice that we see distinct clusters when we try to identify cell states, but not so when we try to identify regions contributing to a cluster. This is similar to the results obtained by EpiScanpy. However, our clustering regions are more informative using the cisTopic methodology, this is probably because we chose the most optimal number of categories, whereas EpiScanpy may choose differently or by default.
+
+Something important to notice is that the initial Umap dimension reduction plots in both EpiScanpy and cisTopic implementations show a lower cluster which is distinct from the main body of data. This is important because it shows that those cells are likely correlated to regulatory regions and demarkate a particular cell state.
+
+From a technical perspective, it appears Umap visualization is more informative for this data and the cisTopic implementation is a more rigorous method compared to EpiScanpy.
